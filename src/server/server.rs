@@ -43,6 +43,7 @@ impl Server {
 }
 
 pub async fn run(shutdown: impl Future) -> Result<()> {
+  println!("listen: {}", DEFAULT_PORT);
   let listener = TcpListener::bind(&format!("127.0.0.1:{}", DEFAULT_PORT)).await?;
 
   let (notify_shutdown, _) = broadcast::channel(1);
@@ -56,12 +57,6 @@ pub async fn run(shutdown: impl Future) -> Result<()> {
 
   tokio::select! {
       res = server.run() => {
-          // If an error is received here, accepting connections from the TCP
-          // listener failed multiple times and the server is giving up and
-          // shutting down.
-          //
-          // Errors encountered when handling individual connections do not
-          // bubble up to this point.
           if let Err(err) = res {
               error!(cause = %err, "failed to accept");
           }

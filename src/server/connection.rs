@@ -1,14 +1,18 @@
 use std::io::Cursor;
 
 use crate::Result;
+use crate::protocol::Command;
 use anyhow::bail;
 use bytes::Buf;
 use bytes::BytesMut;
+use tokio::io::AsyncWriteExt;
 use tokio::{
   io::{AsyncReadExt, BufWriter},
   net::TcpStream,
   sync::mpsc,
 };
+use tracing::debug;
+use tracing::info;
 
 use super::shutdown::Shutdown;
 use crate::protocol::Frame;
@@ -41,6 +45,7 @@ impl Connection {
   }
 
   pub async fn run(&mut self) -> Result<()> {
+    info!("start process client request");
     while !self.shutdown.is_shutdown() {
       let maybe_frame = tokio::select! {
           res = self.stream. read_frame() => res?,
@@ -55,8 +60,18 @@ impl Connection {
         Some(frame) => frame,
         None => return Ok(()),
       };
+
+      let cmd = Command::from_frame(frame)?;
+
+      debug!(?cmd);
+
+      //cmd.apply(&mut self, &mut self.shutdown).await?;
     }
     Ok(())
+  }
+
+  pub async fn write_frame(&mut self, frame: &Frame) -> std::io::Result<()> {
+    self.stream.write_frame(frame).await
   }
 }
 
@@ -74,7 +89,7 @@ impl RedisStream {
         return Ok(Some(frame));
       }
 
-      if 0 == self.stream.read_buf(&mut self.buffer).await? {
+      if self.stream.read_buf(&mut self.buffer).await? == 0 {
         if self.buffer.is_empty() {
           return Ok(None);
         } else {
@@ -104,5 +119,69 @@ impl RedisStream {
       Err(Incomplete) => Ok(None),
       Err(e) => Err(e.into()),
     }
+  }
+
+  pub async fn write_frame(&mut self, frame: &Frame) -> std::io::Result<()> {
+    match frame {
+      Frame::Array(val) => {
+        self.stream.write_u8(b'*').await?;
+
+        self.write_decimal(val.len() as u64).await?;
+
+        for entry in &**val {
+          self.write_value(entry).await?;
+        }
+      }
+      _ => self.write_value(frame).await?,
+    }
+
+    self.stream.flush().await
+  }
+
+  async fn write_value(&mut self, frame: &Frame) -> std::io::Result<()> {
+    match frame {
+      Frame::Simple(val) => {
+        self.stream.write_u8(b'+').await?;
+        self.stream.write_all(val.as_bytes()).await?;
+        self.stream.write_all(b"\r\n").await?;
+      }
+      Frame::Error(val) => {
+        self.stream.write_u8(b'-').await?;
+        self.stream.write_all(val.as_bytes()).await?;
+        self.stream.write_all(b"\r\n").await?;
+      }
+      Frame::Integer(val) => {
+        self.stream.write_u8(b':').await?;
+        self.write_decimal(*val).await?;
+      }
+      Frame::Null => {
+        self.stream.write_all(b"$-1\r\n").await?;
+      }
+      Frame::Bulk(val) => {
+        let len = val.len();
+
+        self.stream.write_u8(b'$').await?;
+        self.write_decimal(len as u64).await?;
+        self.stream.write_all(val).await?;
+        self.stream.write_all(b"\r\n").await?;
+      }
+      Frame::Array(_val) => unreachable!(),
+    }
+
+    Ok(())
+  }
+
+  async fn write_decimal(&mut self, val: u64) -> std::io::Result<()> {
+    use std::io::Write;
+
+    let mut buf = [0u8; 20];
+    let mut buf = Cursor::new(&mut buf[..]);
+    write!(&mut buf, "{}", val)?;
+
+    let pos = buf.position() as usize;
+    self.stream.write_all(&buf.get_ref()[..pos]).await?;
+    self.stream.write_all(b"\r\n").await?;
+
+    Ok(())
   }
 }
