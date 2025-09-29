@@ -1,3 +1,4 @@
+use clap::Parser;
 use tokio::signal;
 
 mod base;
@@ -7,16 +8,28 @@ mod server;
 mod storage;
 
 use base::Result;
+use config::Config;
 
-use tracing::{Level, info};
 use tracing_subscriber::fmt;
 use tracing_subscriber::fmt::format::FmtSpan;
-use tracing_subscriber::prelude::*;
+
+#[derive(Parser, Debug)]
+#[command(version, about, long_about = None)]
+struct Args {
+  #[arg(short, long)]
+  pub config: Option<String>,
+}
 
 #[tokio::main]
 async fn main() -> Result<()> {
+  let args = Args::parse();
+  //println!("args: {:?}", args);
+
+  let config = Config::new(&args.config)?;
+  //println!("config: {:?}", config);
+
   let subscriber = fmt::Subscriber::builder()
-    .with_max_level(Level::DEBUG)
+    .with_max_level(config.log_level)
     .with_ansi(true)
     //.with_timer(fmt::time::UtcTime::rfc_3339())
     .with_span_events(FmtSpan::CLOSE)
