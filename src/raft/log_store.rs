@@ -26,12 +26,12 @@ use openraft::storage::RaftLogStorage;
 use crate::base::NodeId;
 use crate::raft::TypeConfig;
 
+use super::StorageResult;
+
 #[derive(Debug, Clone)]
 pub struct LogStore {
   db: Arc<DB>,
 }
-
-type StorageResult<T> = Result<T, StorageError<NodeId>>;
 
 fn id_to_bin(id: u64) -> Vec<u8> {
   let mut buf = Vec::with_capacity(8);
