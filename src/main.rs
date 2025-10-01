@@ -4,6 +4,7 @@ use tokio::signal;
 mod base;
 mod config;
 mod protocol;
+mod raft;
 mod server;
 mod storage;
 

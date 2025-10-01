@@ -28,7 +28,7 @@ impl Config {
 
     if let Some(config_file) = config_file {
       let mut default = IniDefault::default();
-      default.comment_symbols = vec![';'];
+      //default.comment_symbols = vec![';'];
       default.delimiters = vec![' '];
 
       if let Some(map) = Ini::new_from_defaults(default)
