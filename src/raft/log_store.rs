@@ -1,38 +1,309 @@
-use openraft::RaftLogReader;
-use rocksdb::ColumnFamily;
-use rocksdb::DB;
-use rocksdb::Direction;
+use std::error::Error;
 use std::fmt::Debug;
-use std::{ops::RangeBounds, sync::Arc};
+use std::marker::PhantomData;
+use std::ops::RangeBounds;
+use std::sync::Arc;
 
 use byteorder::BigEndian;
 use byteorder::ReadBytesExt;
 use byteorder::WriteBytesExt;
-
+use meta::StoreMeta;
+use openraft::LogState;
 use openraft::OptionalSend;
+use openraft::RaftLogReader;
+use openraft::RaftTypeConfig;
 use openraft::StorageError;
-
-use openraft::AnyError;
-use openraft::Entry;
-use openraft::ErrorSubject;
-use openraft::ErrorVerb;
-use openraft::LogId;
-use openraft::StorageIOError;
-use openraft::Vote;
-use openraft::storage::LogFlushed;
-use openraft::storage::LogState;
+use openraft::TokioRuntime;
+use openraft::alias::EntryOf;
+use openraft::alias::LogIdOf;
+use openraft::alias::VoteOf;
+use openraft::entry::RaftEntry;
+use openraft::storage::IOFlushed;
 use openraft::storage::RaftLogStorage;
-
-use crate::base::NodeId;
-use crate::raft::TypeConfig;
-
-use super::StorageResult;
+use rocksdb::ColumnFamily;
+use rocksdb::DB;
+use rocksdb::Direction;
+use tokio::task::spawn_blocking;
 
 #[derive(Debug, Clone)]
-pub struct LogStore {
+pub struct RocksLogStore<C>
+where C: RaftTypeConfig
+{
   db: Arc<DB>,
+  _p: PhantomData<C>,
 }
 
+impl<C> RocksLogStore<C>
+where C: RaftTypeConfig
+{
+  pub fn new(db: Arc<DB>) -> Self {
+    db.cf_handle("meta")
+      .expect("column family `meta` not found");
+    db.cf_handle("logs")
+      .expect("column family `logs` not found");
+
+    Self {
+      db,
+      _p: Default::default(),
+    }
+  }
+
+  fn cf_meta(&self) -> &ColumnFamily {
+    self.db.cf_handle("meta").unwrap()
+  }
+
+  fn cf_logs(&self) -> &ColumnFamily {
+    self.db.cf_handle("logs").unwrap()
+  }
+
+  /// Get a store metadata.
+  ///
+  /// It returns `None` if the store does not have such a metadata stored.
+  fn get_meta<M: StoreMeta<C>>(&self) -> Result<Option<M::Value>, StorageError<C>> {
+    let bytes = self
+      .db
+      .get_cf(self.cf_meta(), M::KEY)
+      .map_err(M::read_err)?;
+
+    let Some(bytes) = bytes else {
+      return Ok(None);
+    };
+
+    let t = serde_json::from_slice(&bytes).map_err(M::read_err)?;
+
+    Ok(Some(t))
+  }
+
+  /// Save a store metadata.
+  fn put_meta<M: StoreMeta<C>>(&self, value: &M::Value) -> Result<(), StorageError<C>> {
+    let json_value = serde_json::to_vec(value).map_err(|e| M::write_err(value, e))?;
+
+    self
+      .db
+      .put_cf(self.cf_meta(), M::KEY, json_value)
+      .map_err(|e| M::write_err(value, e))?;
+
+    Ok(())
+  }
+}
+
+impl<C> RaftLogReader<C> for RocksLogStore<C>
+where C: RaftTypeConfig
+{
+  async fn try_get_log_entries<RB: RangeBounds<u64> + Clone + Debug + OptionalSend>(
+    &mut self,
+    range: RB,
+  ) -> Result<Vec<C::Entry>, StorageError<C>> {
+    let start = match range.start_bound() {
+      std::ops::Bound::Included(x) => id_to_bin(*x),
+      std::ops::Bound::Excluded(x) => id_to_bin(*x + 1),
+      std::ops::Bound::Unbounded => id_to_bin(0),
+    };
+
+    let mut res = Vec::new();
+
+    let it = self.db.iterator_cf(
+      self.cf_logs(),
+      rocksdb::IteratorMode::From(&start, Direction::Forward),
+    );
+    for item_res in it {
+      let (id, val) = item_res.map_err(read_logs_err)?;
+
+      let id = bin_to_id(&id);
+      if !range.contains(&id) {
+        break;
+      }
+
+      let entry: EntryOf<C> = serde_json::from_slice(&val).map_err(read_logs_err)?;
+
+      assert_eq!(id, entry.index());
+
+      res.push(entry);
+    }
+    Ok(res)
+  }
+
+  async fn read_vote(&mut self) -> Result<Option<VoteOf<C>>, StorageError<C>> {
+    self.get_meta::<meta::Vote>()
+  }
+}
+
+// It requires TokioRuntime because it uses spawn_blocking internally.
+impl<C> RaftLogStorage<C> for RocksLogStore<C>
+where C: RaftTypeConfig<AsyncRuntime = TokioRuntime>
+{
+  type LogReader = Self;
+
+  async fn get_log_state(&mut self) -> Result<LogState<C>, StorageError<C>> {
+    let last = self
+      .db
+      .iterator_cf(self.cf_logs(), rocksdb::IteratorMode::End)
+      .next();
+
+    let last_log_id = match last {
+      None => None,
+      Some(res) => {
+        let (_log_index, entry_bytes) = res.map_err(read_logs_err)?;
+        let ent = serde_json::from_slice::<EntryOf<C>>(&entry_bytes).map_err(read_logs_err)?;
+        Some(ent.log_id())
+      }
+    };
+
+    let last_purged_log_id = self.get_meta::<meta::LastPurged>()?;
+
+    let last_log_id = match last_log_id {
+      None => last_purged_log_id.clone(),
+      Some(x) => Some(x),
+    };
+
+    Ok(LogState {
+      last_purged_log_id,
+      last_log_id,
+    })
+  }
+
+  async fn get_log_reader(&mut self) -> Self::LogReader {
+    self.clone()
+  }
+
+  async fn save_vote(&mut self, vote: &VoteOf<C>) -> Result<(), StorageError<C>> {
+    self.put_meta::<meta::Vote>(vote)?;
+
+    // Vote must be persisted to disk before returning.
+    let db = self.db.clone();
+    spawn_blocking(move || db.flush_wal(true))
+      .await
+      .map_err(|e| StorageError::write_vote(&std::io::Error::other(e.to_string())))?
+      .map_err(|e| StorageError::write_vote(&e))?;
+
+    Ok(())
+  }
+
+  async fn append<I>(&mut self, entries: I, callback: IOFlushed<C>) -> Result<(), StorageError<C>>
+  where I: IntoIterator<Item = EntryOf<C>> + Send {
+    for entry in entries {
+      let id = id_to_bin(entry.index());
+      self
+        .db
+        .put_cf(
+          self.cf_logs(),
+          id,
+          serde_json::to_vec(&entry).map_err(|e| StorageError::write_logs(&e))?,
+        )
+        .map_err(|e| StorageError::write_logs(&e))?;
+    }
+
+    // Make sure the logs are persisted to disk before invoking the callback.
+    //
+    // But the above `pub_cf()` must be called in this function, not in another task.
+    // Because when the function returns, it requires the log entries can be read.
+    let db = self.db.clone();
+    let handle = spawn_blocking(move || {
+      let res = db.flush_wal(true).map_err(std::io::Error::other);
+      callback.io_completed(res);
+    });
+    drop(handle);
+
+    // Return now, and the callback will be invoked later when IO is done.
+    Ok(())
+  }
+
+  async fn truncate(&mut self, log_id: LogIdOf<C>) -> Result<(), StorageError<C>> {
+    tracing::debug!("truncate: [{:?}, +oo)", log_id);
+
+    let from = id_to_bin(log_id.index());
+    let to = id_to_bin(u64::MAX);
+    self
+      .db
+      .delete_range_cf(self.cf_logs(), &from, &to)
+      .map_err(|e| StorageError::write_logs(&e))?;
+
+    // Truncating does not need to be persisted.
+    Ok(())
+  }
+
+  async fn purge(&mut self, log_id: LogIdOf<C>) -> Result<(), StorageError<C>> {
+    tracing::debug!("delete_log: [0, {:?}]", log_id);
+
+    // Write the last-purged log id before purging the logs.
+    // The logs at and before last-purged log id will be ignored by openraft.
+    // Therefore, there is no need to do it in a transaction.
+    self.put_meta::<meta::LastPurged>(&log_id)?;
+
+    let from = id_to_bin(0);
+    let to = id_to_bin(log_id.index() + 1);
+    self
+      .db
+      .delete_range_cf(self.cf_logs(), &from, &to)
+      .map_err(|e| StorageError::write_logs(&e))?;
+
+    // Purging does not need to be persistent.
+    Ok(())
+  }
+}
+
+/// Metadata of a raft-store.
+///
+/// In raft, except logs and state machine, the store also has to store several piece of metadata.
+/// This sub mod defines the key-value pairs of these metadata.
+mod meta {
+  use openraft::AnyError;
+  use openraft::ErrorSubject;
+  use openraft::ErrorVerb;
+  use openraft::RaftTypeConfig;
+  use openraft::StorageError;
+  use openraft::alias::LogIdOf;
+  use openraft::alias::VoteOf;
+
+  /// Defines metadata key and value
+  pub(crate) trait StoreMeta<C>
+  where C: RaftTypeConfig
+  {
+    /// The key used to store in rocksdb
+    const KEY: &'static str;
+
+    /// The type of the value to store
+    type Value: serde::Serialize + serde::de::DeserializeOwned;
+
+    /// The subject this meta belongs to, and will be embedded into the returned storage error.
+    fn subject(v: Option<&Self::Value>) -> ErrorSubject<C>;
+
+    fn read_err(e: impl std::error::Error + 'static) -> StorageError<C> {
+      StorageError::new(Self::subject(None), ErrorVerb::Read, AnyError::new(&e))
+    }
+
+    fn write_err(v: &Self::Value, e: impl std::error::Error + 'static) -> StorageError<C> {
+      StorageError::new(Self::subject(Some(v)), ErrorVerb::Write, AnyError::new(&e))
+    }
+  }
+
+  pub(crate) struct LastPurged {}
+  pub(crate) struct Vote {}
+
+  impl<C> StoreMeta<C> for LastPurged
+  where C: RaftTypeConfig
+  {
+    const KEY: &'static str = "last_purged_log_id";
+    type Value = LogIdOf<C>;
+
+    fn subject(_v: Option<&Self::Value>) -> ErrorSubject<C> {
+      ErrorSubject::Store
+    }
+  }
+  impl<C> StoreMeta<C> for Vote
+  where C: RaftTypeConfig
+  {
+    const KEY: &'static str = "vote";
+    type Value = VoteOf<C>;
+
+    fn subject(_v: Option<&Self::Value>) -> ErrorSubject<C> {
+      ErrorSubject::Vote
+    }
+  }
+}
+
+/// converts an id to a byte vector for storing in the database.
+/// Note that we're using big endian encoding to ensure correct sorting of keys
 fn id_to_bin(id: u64) -> Vec<u8> {
   let mut buf = Vec::with_capacity(8);
   buf.write_u64::<BigEndian>(id).unwrap();
@@ -43,237 +314,7 @@ fn bin_to_id(buf: &[u8]) -> u64 {
   (&buf[0..8]).read_u64::<BigEndian>().unwrap()
 }
 
-impl LogStore {
-  fn store(&self) -> &ColumnFamily {
-    self.db.cf_handle("store").unwrap()
-  }
-
-  fn logs(&self) -> &ColumnFamily {
-    self.db.cf_handle("logs").unwrap()
-  }
-
-  fn flush(
-    &self,
-    subject: ErrorSubject<NodeId>,
-    verb: ErrorVerb,
-  ) -> Result<(), StorageIOError<NodeId>> {
-    self
-      .db
-      .flush_wal(true)
-      .map_err(|e| StorageIOError::new(subject, verb, AnyError::new(&e)))?;
-    Ok(())
-  }
-
-  fn get_last_purged_(&self) -> StorageResult<Option<LogId<u64>>> {
-    Ok(
-      self
-        .db
-        .get_cf(self.store(), b"last_purged_log_id")
-        .map_err(|e| StorageIOError::read(&e))?
-        .and_then(|v| serde_json::from_slice(&v).ok()),
-    )
-  }
-
-  fn set_last_purged_(&self, log_id: LogId<u64>) -> StorageResult<()> {
-    self
-      .db
-      .put_cf(
-        self.store(),
-        b"last_purged_log_id",
-        serde_json::to_vec(&log_id).unwrap().as_slice(),
-      )
-      .map_err(|e| StorageIOError::write(&e))?;
-
-    self.flush(ErrorSubject::Store, ErrorVerb::Write)?;
-    Ok(())
-  }
-
-  fn set_committed_(
-    &self,
-    committed: &Option<LogId<NodeId>>,
-  ) -> Result<(), StorageIOError<NodeId>> {
-    let json = serde_json::to_vec(committed).unwrap();
-
-    self
-      .db
-      .put_cf(self.store(), b"committed", json)
-      .map_err(|e| StorageIOError::write(&e))?;
-
-    self.flush(ErrorSubject::Store, ErrorVerb::Write)?;
-    Ok(())
-  }
-
-  fn get_committed_(&self) -> StorageResult<Option<LogId<NodeId>>> {
-    Ok(
-      self
-        .db
-        .get_cf(self.store(), b"committed")
-        .map_err(|e| StorageError::IO {
-          source: StorageIOError::read(&e),
-        })?
-        .and_then(|v| serde_json::from_slice(&v).ok()),
-    )
-  }
-
-  fn set_vote_(&self, vote: &Vote<NodeId>) -> StorageResult<()> {
-    self
-      .db
-      .put_cf(self.store(), b"vote", serde_json::to_vec(vote).unwrap())
-      .map_err(|e| StorageError::IO {
-        source: StorageIOError::write_vote(&e),
-      })?;
-
-    self.flush(ErrorSubject::Vote, ErrorVerb::Write)?;
-    Ok(())
-  }
-
-  fn get_vote_(&self) -> StorageResult<Option<Vote<NodeId>>> {
-    Ok(
-      self
-        .db
-        .get_cf(self.store(), b"vote")
-        .map_err(|e| StorageError::IO {
-          source: StorageIOError::write_vote(&e),
-        })?
-        .and_then(|v| serde_json::from_slice(&v).ok()),
-    )
-  }
-}
-
-impl RaftLogReader<TypeConfig> for LogStore {
-  async fn try_get_log_entries<RB: RangeBounds<u64> + Clone + Debug + OptionalSend>(
-    &mut self,
-    range: RB,
-  ) -> StorageResult<Vec<Entry<TypeConfig>>> {
-    let start = match range.start_bound() {
-      std::ops::Bound::Included(x) => id_to_bin(*x),
-      std::ops::Bound::Excluded(x) => id_to_bin(*x + 1),
-      std::ops::Bound::Unbounded => id_to_bin(0),
-    };
-    self
-      .db
-      .iterator_cf(
-        self.logs(),
-        rocksdb::IteratorMode::From(&start, Direction::Forward),
-      )
-      .map(|res| {
-        let (id, val) = res.unwrap();
-        let entry: StorageResult<Entry<_>> =
-          serde_json::from_slice(&val).map_err(|e| StorageError::IO {
-            source: StorageIOError::read_logs(&e),
-          });
-        let id = bin_to_id(&id);
-
-        assert_eq!(Ok(id), entry.as_ref().map(|e| e.log_id.index));
-        (id, entry)
-      })
-      .take_while(|(id, _)| range.contains(id))
-      .map(|x| x.1)
-      .collect()
-  }
-}
-
-impl RaftLogStorage<TypeConfig> for LogStore {
-  type LogReader = Self;
-
-  async fn get_log_state(&mut self) -> StorageResult<LogState<TypeConfig>> {
-    let last = self
-      .db
-      .iterator_cf(self.logs(), rocksdb::IteratorMode::End)
-      .next()
-      .and_then(|res| {
-        let (_, ent) = res.unwrap();
-        Some(
-          serde_json::from_slice::<Entry<TypeConfig>>(&ent)
-            .ok()?
-            .log_id,
-        )
-      });
-
-    let last_purged_log_id = self.get_last_purged_()?;
-
-    let last_log_id = match last {
-      None => last_purged_log_id,
-      Some(x) => Some(x),
-    };
-    Ok(LogState {
-      last_purged_log_id,
-      last_log_id,
-    })
-  }
-
-  async fn save_committed(
-    &mut self,
-    _committed: Option<LogId<NodeId>>,
-  ) -> Result<(), StorageError<NodeId>> {
-    self.set_committed_(&_committed)?;
-    Ok(())
-  }
-
-  async fn read_committed(&mut self) -> Result<Option<LogId<NodeId>>, StorageError<NodeId>> {
-    let c = self.get_committed_()?;
-    Ok(c)
-  }
-
-  #[tracing::instrument(level = "trace", skip(self))]
-  async fn save_vote(&mut self, vote: &Vote<NodeId>) -> Result<(), StorageError<NodeId>> {
-    self.set_vote_(vote)
-  }
-
-  async fn read_vote(&mut self) -> Result<Option<Vote<NodeId>>, StorageError<NodeId>> {
-    self.get_vote_()
-  }
-
-  #[tracing::instrument(level = "trace", skip_all)]
-  async fn append<I>(&mut self, entries: I, callback: LogFlushed<TypeConfig>) -> StorageResult<()>
-  where
-    I: IntoIterator<Item = Entry<TypeConfig>> + Send,
-    I::IntoIter: Send,
-  {
-    for entry in entries {
-      let id = id_to_bin(entry.log_id.index);
-      assert_eq!(bin_to_id(&id), entry.log_id.index);
-      self
-        .db
-        .put_cf(
-          self.logs(),
-          id,
-          serde_json::to_vec(&entry).map_err(|e| StorageIOError::write_logs(&e))?,
-        )
-        .map_err(|e| StorageIOError::write_logs(&e))?;
-    }
-
-    callback.log_io_completed(Ok(()));
-
-    Ok(())
-  }
-
-  #[tracing::instrument(level = "debug", skip(self))]
-  async fn truncate(&mut self, log_id: LogId<NodeId>) -> StorageResult<()> {
-    tracing::debug!("delete_log: [{:?}, +oo)", log_id);
-
-    let from = id_to_bin(log_id.index);
-    let to = id_to_bin(0xff_ff_ff_ff_ff_ff_ff_ff);
-    self
-      .db
-      .delete_range_cf(self.logs(), &from, &to)
-      .map_err(|e| StorageIOError::write_logs(&e).into())
-  }
-
-  #[tracing::instrument(level = "debug", skip(self))]
-  async fn purge(&mut self, log_id: LogId<NodeId>) -> Result<(), StorageError<NodeId>> {
-    tracing::debug!("delete_log: [0, {:?}]", log_id);
-
-    self.set_last_purged_(log_id)?;
-    let from = id_to_bin(0);
-    let to = id_to_bin(log_id.index + 1);
-    self
-      .db
-      .delete_range_cf(self.logs(), &from, &to)
-      .map_err(|e| StorageIOError::write_logs(&e).into())
-  }
-
-  async fn get_log_reader(&mut self) -> Self::LogReader {
-    self.clone()
-  }
+fn read_logs_err<C>(e: impl Error + 'static) -> StorageError<C>
+where C: RaftTypeConfig {
+  StorageError::read_logs(&e)
 }

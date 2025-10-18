@@ -1,8 +1,10 @@
-use crate::Result;
 use std::collections::HashMap;
 
-use configparser::ini::{Ini, IniDefault};
+use configparser::ini::Ini;
+use configparser::ini::IniDefault;
 use tracing::Level;
+
+use crate::Result;
 
 #[derive(Debug)]
 pub struct Config {
@@ -10,6 +12,8 @@ pub struct Config {
   pub server_port: u32,
 
   pub log_level: Level,
+
+  pub data_dir: String,
 }
 
 impl Default for Config {
@@ -18,6 +22,7 @@ impl Default for Config {
       server_host: "127.0.0.1".to_string(),
       server_port: 6622,
       log_level: Level::INFO,
+      data_dir: "./.coredb_data/".to_string(),
     }
   }
 }
@@ -28,7 +33,7 @@ impl Config {
 
     if let Some(config_file) = config_file {
       let mut default = IniDefault::default();
-      //default.comment_symbols = vec![';'];
+      // default.comment_symbols = vec![';'];
       default.delimiters = vec![' '];
 
       if let Some(map) = Ini::new_from_defaults(default)
@@ -49,6 +54,8 @@ impl Config {
             config.server_port = value.parse()?;
           } else if *key == "log_level" {
             config.log_level = value.parse()?;
+          } else if *key == "data_dir" {
+            config.data_dir = value.parse()?;
           }
         }
       }

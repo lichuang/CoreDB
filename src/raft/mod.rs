@@ -1,20 +1,7 @@
-// mod log_store;
-// mod state_machine;
+mod declare_types;
+mod log_store;
+mod state_machine;
+mod storage;
 
-use std::io::Cursor;
-
-use openraft::StorageError;
-
-use crate::base::Node;
-use crate::base::NodeId;
-use crate::base::Request;
-use crate::base::Response;
-
-openraft::declare_raft_types!(
-    pub TypeConfig:
-        D = Request,
-        R = Response,
-        Node = Node,
-);
-
-type StorageResult<T> = Result<T, StorageError<NodeId>>;
+pub use declare_types::Raft;
+pub use storage::new_raft_storage;

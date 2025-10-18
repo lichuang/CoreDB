@@ -40,5 +40,5 @@ async fn main() -> Result<()> {
     .finish();
   tracing::subscriber::set_global_default(subscriber).unwrap();
 
-  server::run(signal::ctrl_c()).await
+  server::run(config, signal::ctrl_c()).await
 }

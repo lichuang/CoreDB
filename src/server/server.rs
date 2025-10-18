@@ -1,12 +1,18 @@
-use tokio::{
-  net::{TcpListener, TcpStream},
-  sync::{broadcast, mpsc},
-};
-use tracing::{debug, error, info, instrument};
+use tokio::net::TcpListener;
+use tokio::net::TcpStream;
+use tokio::sync::broadcast;
+use tokio::sync::mpsc;
+use tracing::debug;
+use tracing::error;
+use tracing::info;
+use tracing::instrument;
 
 use super::shutdown::Shutdown;
-
-use crate::{Result, server::connection::Connection};
+use crate::Result;
+use crate::config::Config;
+use crate::raft::Raft;
+use crate::raft::new_raft_storage;
+use crate::server::connection::Connection;
 
 const DEFAULT_PORT: u16 = 6379;
 
@@ -16,6 +22,7 @@ pub struct Server {
   notify_shutdown: broadcast::Sender<()>,
 
   shutdown_complete_tx: mpsc::Sender<()>,
+  // raft: Raft,
 }
 
 impl Server {
@@ -42,12 +49,14 @@ impl Server {
   }
 }
 
-pub async fn run(shutdown: impl Future) -> Result<()> {
+pub async fn run(config: Config, shutdown: impl Future) -> Result<()> {
   println!("listen: {}", DEFAULT_PORT);
   let listener = TcpListener::bind(&format!("127.0.0.1:{}", DEFAULT_PORT)).await?;
 
   let (notify_shutdown, _) = broadcast::channel(1);
   let (shutdown_complete_tx, mut shutdown_complete_rx) = mpsc::channel(1);
+
+  let (log_store, state_machine_store) = new_raft_storage(&config.data_dir).await;
 
   let mut server = Server {
     listener,
