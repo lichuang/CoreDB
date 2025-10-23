@@ -31,8 +31,8 @@ use serde::Deserialize;
 use serde::Serialize;
 use tokio::task::spawn_blocking;
 
-use super::declare_types::TypeConfig;
 use super::log_store::RocksLogStore;
+use super::raft_types::TypeConfig;
 use crate::base::Request;
 use crate::base::Response;
 

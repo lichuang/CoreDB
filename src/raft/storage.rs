@@ -5,8 +5,8 @@ use rocksdb::ColumnFamilyDescriptor;
 use rocksdb::DB;
 use rocksdb::Options;
 
-use super::declare_types::TypeConfig;
 use super::log_store::RocksLogStore;
+use super::raft_types::TypeConfig;
 use super::state_machine::RocksStateMachine;
 
 pub async fn new_raft_storage<P: AsRef<Path>>(
