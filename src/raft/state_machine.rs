@@ -33,8 +33,8 @@ use tokio::task::spawn_blocking;
 
 use super::log_store::RocksLogStore;
 use super::raft_types::TypeConfig;
-use crate::base::Request;
-use crate::base::Response;
+use crate::raft::raft_types::Request;
+use crate::raft::raft_types::Response;
 
 /// State machine backed by RocksDB for full persistence.
 /// All application data is stored directly in the `sm_data` column family.

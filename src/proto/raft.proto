@@ -1,5 +1,7 @@
 syntax = "proto3";
 
+package proto;
+
 // A quorum granted or not granted Leader.
 message LeaderId {
   uint64 term = 1;

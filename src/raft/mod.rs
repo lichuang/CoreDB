@@ -1,7 +1,7 @@
 mod endpoint;
 mod log_store;
 mod network;
-// mod raft_client;
+mod raft_client;
 mod raft_types;
 mod state_machine;
 mod storage;
