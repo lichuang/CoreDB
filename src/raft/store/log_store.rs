@@ -1,4 +1,3 @@
-use std::error::Error;
 use std::fmt::Debug;
 use std::marker::PhantomData;
 use std::ops::RangeBounds;
@@ -7,8 +6,6 @@ use std::sync::Arc;
 use byteorder::BigEndian;
 use byteorder::ReadBytesExt;
 use byteorder::WriteBytesExt;
-use meta::StoreMeta;
-use meta::StoreMetaValue as _;
 use openraft::OptionalSend;
 use openraft::RaftLogReader;
 use openraft::RaftTypeConfig;
@@ -25,9 +22,13 @@ use rocksdb::DB;
 use rocksdb::Direction;
 use tokio::task::spawn_blocking;
 
+use super::meta::StoreMeta;
 use crate::raft::protobuf as pb;
-use crate::raft::raft_types::LogState;
-use crate::raft::raft_types::TypeConfig;
+use crate::raft::store::meta::LastPurged;
+use crate::raft::types::raft_codec::RaftCodec;
+use crate::raft::types::raft_codec::read_logs_err;
+use crate::raft::types::raft_types::LogState;
+use crate::raft::types::raft_types::TypeConfig;
 
 #[derive(Debug, Clone)]
 pub struct RocksLogStore<C>
@@ -94,7 +95,7 @@ impl RaftLogReader<TypeConfig> for RocksLogStore<TypeConfig> {
   async fn try_get_log_entries<RB: RangeBounds<u64> + Clone + Debug + OptionalSend>(
     &mut self,
     range: RB,
-  ) -> Result<Vec<crate::raft::raft_types::Entry>, StorageError<TypeConfig>> {
+  ) -> Result<Vec<crate::raft::types::raft_types::Entry>, StorageError<TypeConfig>> {
     let start = match range.start_bound() {
       std::ops::Bound::Included(x) => id_to_bin(*x),
       std::ops::Bound::Excluded(x) => id_to_bin(*x + 1),
@@ -125,7 +126,7 @@ impl RaftLogReader<TypeConfig> for RocksLogStore<TypeConfig> {
   }
 
   async fn read_vote(&mut self) -> Result<Option<VoteOf<TypeConfig>>, StorageError<TypeConfig>> {
-    self.get_meta::<meta::Vote>()
+    self.get_meta::<super::meta::Vote>()
   }
 }
 
@@ -148,7 +149,7 @@ impl RaftLogStorage<TypeConfig> for RocksLogStore<TypeConfig> {
       }
     };
 
-    let last_purged_log_id = self.get_meta::<meta::LastPurged>()?;
+    let last_purged_log_id = self.get_meta::<LastPurged>()?;
 
     let last_log_id = match last_log_id {
       None => last_purged_log_id.clone(),
@@ -166,7 +167,7 @@ impl RaftLogStorage<TypeConfig> for RocksLogStore<TypeConfig> {
   }
 
   async fn save_vote(&mut self, vote: &VoteOf<TypeConfig>) -> Result<(), StorageError<TypeConfig>> {
-    self.put_meta::<meta::Vote>(vote)?;
+    self.put_meta::<super::meta::Vote>(vote)?;
 
     // Vote must be persisted to disk before returning.
     let db = self.db.clone();
@@ -232,7 +233,7 @@ impl RaftLogStorage<TypeConfig> for RocksLogStore<TypeConfig> {
     // Write the last-purged log id before purging the logs.
     // The logs at and before last-purged log id will be ignored by openraft.
     // Therefore, there is no need to do it in a transaction.
-    self.put_meta::<meta::LastPurged>(&log_id)?;
+    self.put_meta::<LastPurged>(&log_id)?;
 
     let from = id_to_bin(0);
     let to = id_to_bin(log_id.index() + 1);
@@ -246,102 +247,6 @@ impl RaftLogStorage<TypeConfig> for RocksLogStore<TypeConfig> {
   }
 }
 
-/// Metadata of a raft-store.
-///
-/// In raft, except logs and state machine, the store also has to store several piece of metadata.
-/// This sub mod defines the key-value pairs of these metadata.
-mod meta {
-  use openraft::AnyError;
-  use openraft::ErrorSubject;
-  use openraft::ErrorVerb;
-  use openraft::StorageError;
-  use openraft::alias::LogIdOf;
-  use openraft::alias::VoteOf;
-  use prost::Message;
-
-  use super::read_logs_err;
-  use crate::raft::raft_types::TypeConfig;
-
-  pub(crate) trait StoreMetaValue {
-    fn decode_from(buf: &[u8]) -> Result<Self, StorageError<TypeConfig>>
-    where Self: Sized;
-    fn encode_to(&self) -> Result<Vec<u8>, StorageError<TypeConfig>>;
-  }
-
-  /// Defines metadata key and value
-  pub(crate) trait StoreMeta {
-    /// The key used to store in rocksdb
-    const KEY: &'static str;
-
-    /// The type of the value to store
-    type Value: StoreMetaValue;
-
-    /// The subject this meta belongs to, and will be embedded into the returned storage error.
-    fn subject(v: Option<&Self::Value>) -> ErrorSubject<TypeConfig>;
-
-    fn read_err(e: impl std::error::Error + 'static) -> StorageError<TypeConfig> {
-      StorageError::new(Self::subject(None), ErrorVerb::Read, AnyError::new(&e))
-    }
-
-    fn write_err(v: &Self::Value, e: impl std::error::Error + 'static) -> StorageError<TypeConfig> {
-      StorageError::new(Self::subject(Some(v)), ErrorVerb::Write, AnyError::new(&e))
-    }
-  }
-
-  pub(crate) struct LastPurged {}
-  pub(crate) struct Vote {}
-
-  impl StoreMetaValue for LogIdOf<TypeConfig> {
-    fn decode_from(buf: &[u8]) -> Result<Self, StorageError<TypeConfig>>
-    where Self: Sized {
-      let log_id = crate::raft::protobuf::LogId::decode(buf).map_err(read_logs_err)?;
-
-      Ok(Self {
-        leader_id: log_id.term,
-        index: log_id.index,
-      })
-    }
-
-    fn encode_to(&self) -> Result<Vec<u8>, StorageError<TypeConfig>> {
-      let log_id = crate::raft::protobuf::LogId {
-        term: self.leader_id,
-        index: self.index,
-      };
-
-      Ok(log_id.encode_to_vec())
-    }
-  }
-
-  impl StoreMetaValue for VoteOf<TypeConfig> {
-    fn decode_from(buf: &[u8]) -> Result<Self, StorageError<TypeConfig>>
-    where Self: Sized {
-      Ok(crate::raft::protobuf::Vote::decode(buf).map_err(read_logs_err)?)
-    }
-
-    fn encode_to(&self) -> Result<Vec<u8>, StorageError<TypeConfig>> {
-      Ok(self.encode_to_vec())
-    }
-  }
-
-  impl StoreMeta for LastPurged {
-    const KEY: &'static str = "last_purged_log_id";
-    type Value = LogIdOf<TypeConfig>;
-
-    fn subject(_v: Option<&Self::Value>) -> ErrorSubject<TypeConfig> {
-      ErrorSubject::Store
-    }
-  }
-
-  impl StoreMeta for Vote {
-    const KEY: &'static str = "vote";
-    type Value = VoteOf<TypeConfig>;
-
-    fn subject(_v: Option<&Self::Value>) -> ErrorSubject<TypeConfig> {
-      ErrorSubject::Vote
-    }
-  }
-}
-
 /// converts an id to a byte vector for storing in the database.
 /// Note that we're using big endian encoding to ensure correct sorting of keys
 fn id_to_bin(id: u64) -> Vec<u8> {
@@ -352,8 +257,4 @@ fn id_to_bin(id: u64) -> Vec<u8> {
 
 fn bin_to_id(buf: &[u8]) -> u64 {
   (&buf[0..8]).read_u64::<BigEndian>().unwrap()
-}
-
-fn read_logs_err(e: impl Error + 'static) -> StorageError<TypeConfig> {
-  StorageError::read_logs(&e)
 }

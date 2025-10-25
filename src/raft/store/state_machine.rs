@@ -32,9 +32,9 @@ use serde::Serialize;
 use tokio::task::spawn_blocking;
 
 use super::log_store::RocksLogStore;
-use super::raft_types::TypeConfig;
-use crate::raft::raft_types::Request;
-use crate::raft::raft_types::Response;
+use crate::raft::types::raft_types::Request;
+use crate::raft::types::raft_types::Response;
+use crate::raft::types::raft_types::TypeConfig;
 
 /// State machine backed by RocksDB for full persistence.
 /// All application data is stored directly in the `sm_data` column family.

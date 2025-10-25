@@ -1,5 +1,5 @@
 use crate::raft::protobuf as pb;
-use crate::raft::raft_types::AppendEntriesResponse;
+use crate::raft::types::raft_types::AppendEntriesResponse;
 
 impl From<pb::AppendEntriesResponse> for AppendEntriesResponse {
   fn from(r: pb::AppendEntriesResponse) -> Self {
