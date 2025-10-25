@@ -1,26 +1,22 @@
 use serde::Deserialize;
 use serde::Serialize;
 
-// ProtoBuf generated files.
-#[allow(clippy::all)]
-pub mod protobuf {
-  tonic::include_proto!("proto");
-}
+use crate::raft::protobuf as pb;
 
 openraft::declare_raft_types!(
     pub TypeConfig:
-        D = Request,
-        R = Response,
+        D = pb::SetRequest,
+        R = pb::Response,
+        LeaderId = pb::LeaderId,
+        Vote = pb::Vote,
+        Entry = pb::Entry,
+        Node = pb::Node,
+        SnapshotData = Vec<u8>,
 );
 
 pub type Raft = openraft::Raft<TypeConfig>;
 
 pub type NodeId = u64;
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq, Default)]
-pub struct Node {
-  pub rpc_addr: String,
-}
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum Request {
@@ -31,3 +27,46 @@ pub enum Request {
 pub struct Response {
   pub value: Option<String>,
 }
+
+pub type Vote = <TypeConfig as openraft::RaftTypeConfig>::Vote;
+pub type LeaderId = <TypeConfig as openraft::RaftTypeConfig>::LeaderId;
+pub type LogId = openraft::LogId<TypeConfig>;
+pub type Entry = <TypeConfig as openraft::RaftTypeConfig>::Entry;
+pub type EntryPayload = openraft::EntryPayload<TypeConfig>;
+pub type Membership = openraft::membership::Membership<TypeConfig>;
+pub type StoredMembership = openraft::StoredMembership<TypeConfig>;
+
+pub type Node = <TypeConfig as openraft::RaftTypeConfig>::Node;
+
+pub type LogState = openraft::storage::LogState<TypeConfig>;
+
+pub type SnapshotMeta = openraft::SnapshotMeta<TypeConfig>;
+pub type Snapshot = openraft::Snapshot<TypeConfig>;
+pub type SnapshotData = <TypeConfig as openraft::RaftTypeConfig>::SnapshotData;
+
+pub type IOFlushed = openraft::storage::IOFlushed<TypeConfig>;
+
+pub type Infallible = openraft::error::Infallible;
+pub type Fatal = openraft::error::Fatal<TypeConfig>;
+pub type RaftError<E = openraft::error::Infallible> = openraft::error::RaftError<TypeConfig, E>;
+pub type RPCError<E = openraft::error::Infallible> = openraft::error::RPCError<TypeConfig, E>;
+
+pub type ErrorSubject = openraft::ErrorSubject<TypeConfig>;
+pub type StorageError = openraft::StorageError<TypeConfig>;
+pub type StreamingError = openraft::error::StreamingError<TypeConfig>;
+
+pub type RaftMetrics = openraft::RaftMetrics<TypeConfig>;
+
+pub type ClientWriteError = openraft::error::ClientWriteError<TypeConfig>;
+pub type CheckIsLeaderError = openraft::error::CheckIsLeaderError<TypeConfig>;
+pub type ForwardToLeader = openraft::error::ForwardToLeader<TypeConfig>;
+pub type InitializeError = openraft::error::InitializeError<TypeConfig>;
+
+pub type VoteRequest = openraft::raft::VoteRequest<TypeConfig>;
+pub type VoteResponse = openraft::raft::VoteResponse<TypeConfig>;
+pub type AppendEntriesRequest = openraft::raft::AppendEntriesRequest<TypeConfig>;
+pub type AppendEntriesResponse = openraft::raft::AppendEntriesResponse<TypeConfig>;
+pub type InstallSnapshotRequest = openraft::raft::InstallSnapshotRequest<TypeConfig>;
+pub type InstallSnapshotResponse = openraft::raft::InstallSnapshotResponse<TypeConfig>;
+pub type SnapshotResponse = openraft::raft::SnapshotResponse<TypeConfig>;
+pub type ClientWriteResponse = openraft::raft::ClientWriteResponse<TypeConfig>;
