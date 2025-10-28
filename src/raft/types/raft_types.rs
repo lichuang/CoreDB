@@ -11,7 +11,7 @@ openraft::declare_raft_types!(
         Vote = pb::Vote,
         Entry = pb::Entry,
         Node = pb::Node,
-        SnapshotData = Vec<u8>,
+        SnapshotData = pb::SnapshotData,
 );
 
 pub type Raft = openraft::Raft<TypeConfig>;
@@ -70,3 +70,5 @@ pub type InstallSnapshotRequest = openraft::raft::InstallSnapshotRequest<TypeCon
 pub type InstallSnapshotResponse = openraft::raft::InstallSnapshotResponse<TypeConfig>;
 pub type SnapshotResponse = openraft::raft::SnapshotResponse<TypeConfig>;
 pub type ClientWriteResponse = openraft::raft::ClientWriteResponse<TypeConfig>;
+
+pub type RaftSnapshotData = Vec<(Vec<u8>, Vec<u8>)>;

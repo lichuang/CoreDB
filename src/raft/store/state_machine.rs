@@ -11,7 +11,6 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use openraft::AnyError;
-use openraft::Entry;
 use openraft::EntryPayload;
 use openraft::LogId;
 use openraft::RaftSnapshotBuilder;
@@ -19,20 +18,23 @@ use openraft::RaftTypeConfig;
 use openraft::SnapshotMeta;
 use openraft::StorageError;
 use openraft::StoredMembership;
+use openraft::alias::LogIdOf;
 use openraft::alias::SnapshotDataOf;
 use openraft::entry::RaftEntry;
 use openraft::storage::RaftStateMachine;
 use openraft::storage::Snapshot;
+use prost::Message;
 use rand::Rng;
 use rocksdb::ColumnFamilyDescriptor;
 use rocksdb::DB;
 use rocksdb::Options;
-use serde::Deserialize;
-use serde::Serialize;
 use tokio::task::spawn_blocking;
 
 use super::log_store::RocksLogStore;
-use crate::raft::types::raft_types::Request;
+use crate::raft::protobuf as pb;
+use crate::raft::types::raft_codec::RaftCodec;
+use crate::raft::types::raft_types::Entry;
+use crate::raft::types::raft_types::RaftSnapshotData;
 use crate::raft::types::raft_types::Response;
 use crate::raft::types::raft_types::TypeConfig;
 
@@ -81,34 +83,19 @@ impl RocksStateMachine {
       .db
       .get_cf(cf, "last_applied_log")
       .map_err(|e| StorageError::read(&e))?
-      .map(|bytes| deserialize(&bytes))
+      .map(|bytes| LogIdOf::<TypeConfig>::decode_from(&bytes))
       .transpose()?;
 
     let last_membership = self
       .db
       .get_cf(cf, "last_membership")
       .map_err(|e| StorageError::read(&e))?
-      .map(|bytes| deserialize(&bytes))
+      .map(|bytes| StoredMembership::<TypeConfig>::decode_from(&bytes))
       .transpose()?
       .unwrap_or_default();
 
     Ok((last_applied_log, last_membership))
   }
-}
-
-fn serialize<T: Serialize>(value: &T) -> Result<Vec<u8>, StorageError<TypeConfig>> {
-  serde_json::to_vec(value).map_err(|e| StorageError::write(&e))
-}
-
-fn deserialize<T: for<'de> Deserialize<'de>>(bytes: &[u8]) -> Result<T, StorageError<TypeConfig>> {
-  serde_json::from_slice(bytes).map_err(|e| StorageError::read(&e))
-}
-
-/// Snapshot file format: metadata + data stored together
-#[derive(Serialize, Deserialize)]
-struct SnapshotFile {
-  meta: SnapshotMeta<TypeConfig>,
-  data: Vec<(Vec<u8>, Vec<u8>)>,
 }
 
 impl RaftSnapshotBuilder<TypeConfig> for RocksStateMachine {
@@ -166,26 +153,22 @@ impl RaftSnapshotBuilder<TypeConfig> for RocksStateMachine {
     })??;
 
     // Serialize both metadata and data together
-    let snapshot_file = SnapshotFile {
-      meta: meta.clone(),
-      data: data.clone(),
-    };
-    let file_bytes = serialize(&snapshot_file)
-      .map_err(|e| StorageError::write_snapshot(Some(meta.signature()), AnyError::new(&e)))?;
-
+    // let snapshot_file = SnapshotFile {
+    // meta: meta.clone(),
+    // data: data.clone(),
+    // };
+    // let file_bytes = serialize(&snapshot_file)
+    // .map_err(|e| StorageError::write_snapshot(Some(meta.signature()), AnyError::new(&e)))?;
+    //
     // Write complete snapshot to file
-    let snapshot_path = self.snapshot_dir.join(&snapshot_id);
-    fs::write(&snapshot_path, &file_bytes)
-      .map_err(|e| StorageError::write_snapshot(Some(meta.signature()), &e))?;
+    // let snapshot_path = self.snapshot_dir.join(&snapshot_id);
+    // fs::write(&snapshot_path, &file_bytes)
+    // .map_err(|e| StorageError::write_snapshot(Some(meta.signature()), &e))?;
 
     // Return snapshot with data-only for backward compatibility with the data field
-    let data_bytes = serialize(&data)
-      .map_err(|e| StorageError::write_snapshot(Some(meta.signature()), AnyError::new(&e)))?;
+    let snapshot: pb::SnapshotData = data.into();
 
-    Ok(Snapshot {
-      meta,
-      snapshot: Cursor::new(data_bytes),
-    })
+    Ok(Snapshot { meta, snapshot })
   }
 }
 
@@ -200,7 +183,7 @@ impl RaftStateMachine<TypeConfig> for RocksStateMachine {
   }
 
   async fn apply<I>(&mut self, entries: I) -> Result<Vec<Response>, StorageError<TypeConfig>>
-  where I: IntoIterator<Item = Entry<TypeConfig>> + Send {
+  where I: IntoIterator<Item = Entry> + Send {
     let entries_iter = entries.into_iter();
     let mut res = Vec::with_capacity(entries_iter.size_hint().0);
 
@@ -219,7 +202,7 @@ impl RaftStateMachine<TypeConfig> for RocksStateMachine {
       match entry.payload {
         EntryPayload::Blank => res.push(Response { value: None }),
         EntryPayload::Normal(ref req) => match req {
-          Request::Set { key, value } => {
+          pb::SetRequest { key, value } => {
             batch.put_cf(cf_data, key.as_bytes(), value.as_bytes());
             res.push(Response {
               value: Some(value.clone()),
@@ -235,11 +218,19 @@ impl RaftStateMachine<TypeConfig> for RocksStateMachine {
 
     // Add metadata writes to the batch for atomic commit
     if let Some(ref log_id) = last_applied_log {
-      batch.put_cf(cf_meta, "last_applied_log", serialize(log_id)?);
+      batch.put_cf(
+        cf_meta,
+        "last_applied_log",
+        LogIdOf::<TypeConfig>::encode_to(log_id)?,
+      );
     }
 
     if let Some(ref membership) = last_membership {
-      batch.put_cf(cf_meta, "last_membership", serialize(membership)?);
+      batch.put_cf(
+        cf_meta,
+        "last_membership",
+        StoredMembership::<TypeConfig>::encode_to(membership)?,
+      );
     }
 
     // Atomic write of all data + metadata
@@ -255,7 +246,7 @@ impl RaftStateMachine<TypeConfig> for RocksStateMachine {
   async fn begin_receiving_snapshot(
     &mut self,
   ) -> Result<SnapshotDataOf<TypeConfig>, StorageError<TypeConfig>> {
-    Ok(Cursor::new(Vec::new()))
+    Ok(pb::SnapshotData::default())
   }
 
   async fn install_snapshot(
@@ -264,28 +255,27 @@ impl RaftStateMachine<TypeConfig> for RocksStateMachine {
     snapshot: SnapshotDataOf<TypeConfig>,
   ) -> Result<(), StorageError<TypeConfig>> {
     tracing::info!(
-      { snapshot_size = snapshot.get_ref().len() },
+      { snapshot_size = snapshot.data.len() },
       "decoding snapshot for installation"
     );
 
     // Deserialize snapshot data
-    let snapshot_data: Vec<(Vec<u8>, Vec<u8>)> = deserialize(snapshot.get_ref())
-      .map_err(|e| StorageError::read_snapshot(Some(meta.signature()), AnyError::new(&e)))?;
+    let snapshot_data: RaftSnapshotData = snapshot.clone().into();
 
     // Clone data for file writing later
-    let snapshot_data_clone = snapshot_data.clone();
+    // let snapshot_data_clone = snapshot_data.clone();
 
     // Prepare metadata to restore
     let last_applied_bytes = meta
       .last_log_id
       .as_ref()
       .map(|log_id| {
-        serialize(log_id)
+        LogIdOf::<TypeConfig>::encode_to(log_id)
           .map_err(|e| StorageError::write_snapshot(Some(meta.signature()), AnyError::new(&e)))
       })
       .transpose()?;
 
-    let last_membership_bytes = serialize(&meta.last_membership)
+    let last_membership_bytes = StoredMembership::<TypeConfig>::encode_to(&meta.last_membership)
       .map_err(|e| StorageError::write_snapshot(Some(meta.signature()), AnyError::new(&e)))?;
 
     // Restore data and metadata atomically to RocksDB
@@ -337,12 +327,13 @@ impl RaftStateMachine<TypeConfig> for RocksStateMachine {
     })??;
 
     // Write snapshot file with metadata for get_current_snapshot
-    let snapshot_file = SnapshotFile {
-      meta: meta.clone(),
-      data: snapshot_data_clone,
+    let snapshot_file = pb::SnapshotFile {
+      meta: Some(meta.to_owned().into()),
+      data: Some(snapshot),
     };
-    let file_bytes = serialize(&snapshot_file)
-      .map_err(|e| StorageError::write_snapshot(Some(meta.signature()), AnyError::new(&e)))?;
+    // let file_bytes = serialize(&snapshot_file)
+    // .map_err(|e| StorageError::write_snapshot(Some(meta.signature()), AnyError::new(&e)))?;
+    let file_bytes = snapshot_file.encode_to_vec();
 
     let snapshot_path = self.snapshot_dir.join(&meta.snapshot_id);
     fs::write(&snapshot_path, &file_bytes)
@@ -388,26 +379,23 @@ impl RaftStateMachine<TypeConfig> for RocksStateMachine {
 
     // Read and deserialize snapshot file
     let file_bytes = fs::read(&snapshot_path).map_err(|e| StorageError::read_snapshot(None, &e))?;
-    let snapshot_file: SnapshotFile =
-      deserialize(&file_bytes).map_err(|e| StorageError::read_snapshot(None, AnyError::new(&e)))?;
+    // let snapshot_file: SnapshotFile =
+    // deserialize(&file_bytes).map_err(|e| StorageError::read_snapshot(None, AnyError::new(&e)))?;
 
-    // Serialize data for snapshot field
-    let data_bytes = serialize(&snapshot_file.data)
+    let snapshot_file = pb::SnapshotFile::decode(file_bytes.as_slice())
       .map_err(|e| StorageError::read_snapshot(None, AnyError::new(&e)))?;
+    // Serialize data for snapshot field
+    // let data_bytes = snapshot_file.data.unwrap().encode_to_vec();
 
-    Ok(Some(Snapshot {
-      meta: snapshot_file.meta,
-      snapshot: Cursor::new(data_bytes),
-    }))
+    Ok(Some(snapshot_file.into()))
   }
 }
 
 /// Create a pair of `RocksLogStore` and `RocksStateMachine` that are backed by a same rocks db
 /// instance.
-pub async fn new<C, P: AsRef<Path>>(
+pub async fn new<P: AsRef<Path>>(
   db_path: P,
-) -> Result<(RocksLogStore<C>, RocksStateMachine), std::io::Error>
-where C: RaftTypeConfig {
+) -> Result<(RocksLogStore<TypeConfig>, RocksStateMachine), std::io::Error> {
   let mut db_opts = Options::default();
   db_opts.create_missing_column_families(true);
   db_opts.create_if_missing(true);

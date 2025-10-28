@@ -57,6 +57,11 @@ message LogId {
   uint64 index = 2;
 }
 
+message StoredMembership {
+  Membership membership = 1;
+  LogId log_id = 2;
+}
+
 // VoteRequest represents a request for votes during leader election
 message VoteRequest {
   Vote vote = 1;
@@ -111,6 +116,28 @@ message SnapshotRequestMeta {
   Membership last_membership = 4;
 
   string snapshot_id = 5;
+}
+
+message KeyValue {
+  bytes key = 1;
+  bytes value = 2;
+}
+
+message SnapshotData {
+  repeated KeyValue data = 1;
+}
+
+message SnapshotMeta {
+  LogId last_log_id = 1;
+
+  StoredMembership last_membership = 2;
+
+  string snapshot_id = 3;
+}
+
+message SnapshotFile {
+  SnapshotMeta meta = 1;
+  SnapshotData data = 2;
 }
 
 // The item of snapshot chunk stream.
