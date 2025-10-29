@@ -18,15 +18,8 @@ pub type Raft = openraft::Raft<TypeConfig>;
 
 pub type NodeId = u64;
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub enum Request {
-  Set { key: String, value: String },
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct Response {
-  pub value: Option<String>,
-}
+pub type Response = <TypeConfig as openraft::RaftTypeConfig>::R;
+pub type Request = <TypeConfig as openraft::RaftTypeConfig>::D;
 
 pub type Vote = <TypeConfig as openraft::RaftTypeConfig>::Vote;
 pub type LeaderId = <TypeConfig as openraft::RaftTypeConfig>::LeaderId;

@@ -1,5 +1,6 @@
 use futures::StreamExt;
 use openraft::Snapshot;
+use prost::Message;
 use tonic::Request;
 use tonic::Response;
 use tonic::Status;
@@ -10,7 +11,9 @@ use crate::raft::protobuf as pb;
 use crate::raft::protobuf::VoteRequest;
 use crate::raft::protobuf::VoteResponse;
 use crate::raft::protobuf::raft_service_server::RaftService;
-use crate::raft::types::raft_types::*;
+use crate::raft::types::raft_types::Raft;
+use crate::raft::types::raft_types::SnapshotMeta;
+use crate::raft::types::raft_types::StoredMembership;
 
 /// Internal gRPC service implementation for Raft protocol communications.
 /// This service handles the core Raft consensus protocol operations between cluster nodes.
@@ -147,7 +150,7 @@ impl RaftService for RaftServiceImpl {
 
     let snapshot = Snapshot {
       meta: snapshot_meta,
-      snapshot: snapshot_data_bytes,
+      snapshot: pb::SnapshotData::decode(snapshot_data_bytes.as_slice()).unwrap(),
     };
 
     // Install the full snapshot

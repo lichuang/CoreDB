@@ -195,25 +195,34 @@ impl RaftStateMachine<TypeConfig> for RocksStateMachine {
     let mut last_membership = None;
 
     for entry in entries_iter {
-      tracing::debug!(%entry.log_id, "replicate to sm");
+      tracing::debug!("{} replicate to sm", entry.log_id());
 
       last_applied_log = Some(entry.log_id());
 
-      match entry.payload {
-        EntryPayload::Blank => res.push(Response { value: None }),
-        EntryPayload::Normal(ref req) => match req {
-          pb::SetRequest { key, value } => {
-            batch.put_cf(cf_data, key.as_bytes(), value.as_bytes());
-            res.push(Response {
-              value: Some(value.clone()),
-            })
-          }
-        },
-        EntryPayload::Membership(ref mem) => {
-          last_membership = Some(StoredMembership::new(Some(entry.log_id), mem.clone()));
-          res.push(Response { value: None })
+      let mut response = None;
+      if let Some(ref req) = entry.app_data {
+        let pb::SetRequest { key, value } = req;
+        batch.put_cf(cf_data, key.as_bytes(), value.as_bytes());
+        response = Some(Response {
+          value: Some(value.clone()),
+        });
+      }
+
+      if let Some(ref membership) = entry.membership {
+        last_membership = Some(StoredMembership::new(
+          Some(entry.log_id()),
+          membership.to_owned().into(),
+        ));
+        if response == None {
+          response = Some(Response { value: None });
         }
-      };
+      }
+
+      if let Some(response) = response {
+        res.push(response);
+      } else {
+        res.push(Response { value: None });
+      }
     }
 
     // Add metadata writes to the batch for atomic commit
@@ -389,31 +398,4 @@ impl RaftStateMachine<TypeConfig> for RocksStateMachine {
 
     Ok(Some(snapshot_file.into()))
   }
-}
-
-/// Create a pair of `RocksLogStore` and `RocksStateMachine` that are backed by a same rocks db
-/// instance.
-pub async fn new<P: AsRef<Path>>(
-  db_path: P,
-) -> Result<(RocksLogStore<TypeConfig>, RocksStateMachine), std::io::Error> {
-  let mut db_opts = Options::default();
-  db_opts.create_missing_column_families(true);
-  db_opts.create_if_missing(true);
-
-  let meta = ColumnFamilyDescriptor::new("meta", Options::default());
-  let sm_meta = ColumnFamilyDescriptor::new("sm_meta", Options::default());
-  let sm_data = ColumnFamilyDescriptor::new("sm_data", Options::default());
-  let logs = ColumnFamilyDescriptor::new("logs", Options::default());
-
-  let db_path = db_path.as_ref();
-  let snapshot_dir = db_path.join("snapshots");
-
-  let db = DB::open_cf_descriptors(&db_opts, db_path, vec![meta, sm_meta, sm_data, logs])
-    .map_err(std::io::Error::other)?;
-
-  let db = Arc::new(db);
-  Ok((
-    RocksLogStore::new(db.clone()),
-    RocksStateMachine::new(db, snapshot_dir).await?,
-  ))
 }
