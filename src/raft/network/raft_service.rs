@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use futures::StreamExt;
 use openraft::Snapshot;
 use prost::Message;
@@ -28,7 +30,7 @@ use crate::raft::types::raft_types::StoredMembership;
 /// exposed to other trusted Raft cluster nodes, never to external clients.
 pub struct RaftServiceImpl {
   /// The local Raft node instance that this service operates on
-  raft_node: Raft,
+  raft_node: Arc<Raft>,
 }
 
 impl RaftServiceImpl {
@@ -36,7 +38,7 @@ impl RaftServiceImpl {
   ///
   /// # Arguments
   /// * `raft_node` - The Raft node instance this service will operate on
-  pub fn new(raft_node: Raft) -> Self {
+  pub fn new(raft_node: Arc<Raft>) -> Self {
     RaftServiceImpl { raft_node }
   }
 }
