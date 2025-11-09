@@ -1,10 +1,11 @@
-use anyhow::anyhow;
-use bytes::{Buf, Bytes};
 use std::convert::TryInto;
 use std::fmt;
 use std::io::Cursor;
 use std::num::TryFromIntError;
 use std::string::FromUtf8Error;
+
+use bytes::Buf;
+use bytes::Bytes;
 
 #[derive(Clone, Debug)]
 pub enum Frame {
@@ -20,7 +21,7 @@ pub enum Frame {
 pub enum Error {
   Incomplete,
 
-  Other(crate::base::Error),
+  Other(String),
 }
 
 impl Frame {
@@ -161,11 +162,6 @@ impl Frame {
       _ => unimplemented!(),
     }
   }
-
-  /// Converts the frame to an "unexpected frame" error
-  pub(crate) fn to_error(&self) -> crate::base::Error {
-    anyhow!(format!("unexpected frame: {}", self))
-  }
 }
 
 impl PartialEq<&str> for Frame {
@@ -263,7 +259,7 @@ fn get_line<'a>(src: &mut Cursor<&'a [u8]>) -> Result<&'a [u8], Error> {
 
 impl From<String> for Error {
   fn from(src: String) -> Error {
-    Error::Other(anyhow!(src))
+    Error::Other(src)
   }
 }
 

@@ -1,19 +1,27 @@
-use crate::protocol::Frame;
-use anyhow::anyhow;
+use std::fmt;
+use std::str;
+use std::vec;
 
 use bytes::Bytes;
-use std::{fmt, str, vec};
+
+use super::frame::Error as FrameError;
+use crate::protocol::Frame;
 
 #[derive(Debug)]
 pub(crate) struct Parser {
   parts: vec::IntoIter<Frame>,
 }
 
-#[derive(Debug)]
+#[derive(thiserror::Error, Debug)]
 pub(crate) enum ParseError {
+  #[error("Frame error: {0}")]
+  FrameError(#[from] FrameError),
+
+  #[error("End of Stream")]
   EndOfStream,
 
-  Other(crate::base::Error),
+  #[error("Other frame error: {0}")]
+  Other(String),
 }
 
 impl Parser {
@@ -86,7 +94,7 @@ impl Parser {
 
 impl From<String> for ParseError {
   fn from(src: String) -> ParseError {
-    ParseError::Other(anyhow!(src))
+    ParseError::Other(src)
   }
 }
 
@@ -96,13 +104,14 @@ impl From<&str> for ParseError {
   }
 }
 
-impl fmt::Display for ParseError {
-  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-    match self {
-      ParseError::EndOfStream => "protocol error; unexpected end of stream".fmt(f),
-      ParseError::Other(err) => err.fmt(f),
-    }
-  }
-}
+// impl fmt::Display for ParseError {
+// fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+// match self {
+// ParseError::EndOfStream => "protocol error; unexpected end of stream".fmt(f),
+// ParseError::FrameError(err) => err.fmt(f),
+// ParseError::Other(err) => err.fmt(f),
+// }
+// }
+// }
 
-impl std::error::Error for ParseError {}
+// impl std::error::Error for ParseError {}

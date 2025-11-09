@@ -6,6 +6,18 @@ use tracing::Level;
 
 use crate::Result;
 
+#[derive(thiserror::Error, Debug)]
+pub enum ConfigError {
+  #[error("Parse int error: {0}")]
+  ParseInt(#[from] std::num::ParseIntError),
+
+  #[error("Parse log level error: {0}")]
+  ParseLevel(#[from] tracing::metadata::ParseLevelError),
+
+  #[error("Convert error: {0}")]
+  Infallible(#[from] std::convert::Infallible),
+}
+
 #[derive(Debug)]
 pub struct Config {
   pub server_host: String,
@@ -28,7 +40,7 @@ impl Default for Config {
 }
 
 impl Config {
-  pub fn new(config_file: &Option<String>) -> Result<Self> {
+  pub fn new(config_file: &Option<String>) -> Result<Self, ConfigError> {
     let mut config = Self::default();
 
     if let Some(config_file) = config_file {

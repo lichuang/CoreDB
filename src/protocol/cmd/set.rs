@@ -1,13 +1,15 @@
 use std::time::Duration;
 
 use bytes::Bytes;
+use tracing::instrument;
 
+use crate::errors::Error;
+use crate::errors::Result;
+use crate::protocol::Frame;
 use crate::protocol::ParseError::EndOfStream;
 use crate::protocol::Parser;
 use crate::server::Connection;
 use crate::storage::Db;
-use crate::{base::to_error, protocol::Frame};
-use tracing::{debug, instrument};
 
 #[derive(Debug)]
 pub struct Set {
@@ -39,7 +41,7 @@ impl Set {
     self.expire
   }
 
-  pub(crate) fn parse_frames(parse: &mut Parser) -> crate::Result<Set> {
+  pub(crate) fn parse_frames(parse: &mut Parser) -> Result<Set> {
     let key = parse.next_string()?;
 
     let value = parse.next_bytes()?;
@@ -56,8 +58,8 @@ impl Set {
         expire = Some(Duration::from_millis(ms));
       }
       Ok(_) => {
-        return Err(to_error(
-          "currently `SET` only supports the expiration option",
+        return Err(Error::RedisProtocol(
+          "currently `SET` only supports the expiration option".to_string(),
         ));
       }
       Err(EndOfStream) => {}
@@ -68,14 +70,14 @@ impl Set {
   }
 
   #[instrument(skip(self, db, dst))]
-  pub(crate) async fn apply(self, db: &Db, dst: &mut Connection) -> crate::Result<()> {
+  pub(crate) async fn apply(self, db: &Db, dst: &mut Connection) -> Result<()> {
     // Set the value in the shared database state.
-    //db.set(self.key, self.value, self.expire);
+    // db.set(self.key, self.value, self.expire);
 
     // Create a success response and write it to `dst`.
-    //let response = Frame::Simple("OK".to_string());
-    //debug!(?response);
-    //dst.write_frame(&response).await?;
+    // let response = Frame::Simple("OK".to_string());
+    // debug!(?response);
+    // dst.write_frame(&response).await?;
 
     println!(
       "set {} to {}",

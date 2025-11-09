@@ -26,13 +26,17 @@ use crate::raft::types::raft_types::VoteRequest;
 use crate::raft::types::raft_types::VoteResponse;
 
 /// Provides the networking layer for Raft nodes to communicate with each other.
-pub struct Network {}
+pub struct NetworkFactory {}
 
-impl Network {}
+impl NetworkFactory {
+  pub fn new() -> Self {
+    Self {}
+  }
+}
 
 /// Implementation of the RaftNetworkFactory trait for creating new network connections.
 /// This factory creates gRPC client connections to other Raft nodes.
-impl RaftNetworkFactory<TypeConfig> for Network {
+impl RaftNetworkFactory<TypeConfig> for NetworkFactory {
   type Network = NetworkConnection;
 
   #[tracing::instrument(level = "debug", skip_all)]

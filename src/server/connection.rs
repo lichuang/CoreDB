@@ -1,21 +1,20 @@
 use std::io::Cursor;
 
-use crate::Result;
-use crate::protocol::Command;
-use anyhow::bail;
 use bytes::Buf;
 use bytes::BytesMut;
+use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
-use tokio::{
-  io::{AsyncReadExt, BufWriter},
-  net::TcpStream,
-  sync::mpsc,
-};
+use tokio::io::BufWriter;
+use tokio::net::TcpStream;
+use tokio::sync::mpsc;
 use tracing::debug;
 use tracing::info;
 
 use super::shutdown::Shutdown;
+use crate::Result;
+use crate::protocol::Command;
 use crate::protocol::Frame;
+use crate::protocol::ParseError;
 
 struct RedisStream {
   stream: BufWriter<TcpStream>,
@@ -65,7 +64,7 @@ impl Connection {
 
       debug!(?cmd);
 
-      //cmd.apply(&mut self, &mut self.shutdown).await?;
+      // cmd.apply(&mut self, &mut self.shutdown).await?;
     }
     Ok(())
   }
@@ -93,13 +92,15 @@ impl RedisStream {
         if self.buffer.is_empty() {
           return Ok(None);
         } else {
-          bail!("connection reset by peer");
+          return Err(crate::errors::Error::Connection(
+            "connection reset by peer".into(),
+          ));
         }
       }
     }
   }
 
-  fn parse_frame(&mut self) -> crate::Result<Option<Frame>> {
+  fn parse_frame(&mut self) -> Result<Option<Frame>, ParseError> {
     use crate::protocol::Error::Incomplete;
 
     let mut buf = Cursor::new(&self.buffer[..]);

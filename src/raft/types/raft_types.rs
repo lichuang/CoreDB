@@ -1,3 +1,5 @@
+use std::fmt;
+
 use serde::Deserialize;
 use serde::Serialize;
 
@@ -65,3 +67,34 @@ pub type SnapshotResponse = openraft::raft::SnapshotResponse<TypeConfig>;
 pub type ClientWriteResponse = openraft::raft::ClientWriteResponse<TypeConfig>;
 
 pub type RaftSnapshotData = Vec<(Vec<u8>, Vec<u8>)>;
+
+#[derive(thiserror::Error)]
+pub enum OpenRaftError {
+  #[error("{0}")]
+  Infallible(#[from] Infallible),
+
+  #[error("{0}")]
+  Fatal(#[from] Fatal),
+
+  #[error("{0}")]
+  RaftError(#[from] RaftError),
+
+  #[error("{0}")]
+  RPCError(#[from] RPCError),
+
+  #[error("{0}")]
+  StreamingError(#[from] StreamingError),
+}
+
+impl fmt::Debug for OpenRaftError {
+  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    // 使用 match 语句为每一种错误变体提供描述
+    match self {
+      OpenRaftError::Infallible(err) => write!(f, "{}", err),
+      OpenRaftError::Fatal(err) => write!(f, "{}", err),
+      OpenRaftError::RaftError(err) => write!(f, "{}", err),
+      OpenRaftError::RPCError(err) => write!(f, "{}", err),
+      OpenRaftError::StreamingError(err) => write!(f, "{}", err),
+    }
+  }
+}

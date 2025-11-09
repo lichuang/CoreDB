@@ -1,7 +1,7 @@
 use clap::Parser;
 use tokio::signal;
 
-mod base;
+// mod base;
 mod config;
 // mod engine_traits;
 mod protocol;
@@ -10,10 +10,11 @@ mod raft;
 mod log_wrappers;
 mod server;
 // mod storage;
+mod errors;
 mod util;
 
-use base::Result;
 use config::Config;
+use errors::Result;
 use tracing_subscriber::fmt;
 use tracing_subscriber::fmt::format::FmtSpan;
 
